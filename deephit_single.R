@@ -52,8 +52,6 @@ for (epoch in 1:num_epochs) {
 
   # Forward pass
   predictions <- net(data)
-  #idx_time <- idx_time$clone()  # Ensure it does not hold computation graph
-  #event <- event$clone()
   loss <- deephit_single_loss(predictions, idx_time, event, reduction = "mean")
 
   # Store loss value

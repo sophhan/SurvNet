@@ -13,9 +13,10 @@ learning_rate <- 0.001
 num_epochs <- 100
 dropout_rate <- 0.5
 output_size <- 1
+batch_size <- 100
 
 # Generate some dummy survival data for demonstration
-n <- 100  # Number of samples
+n <- 10000  # Number of samples
 data <- torch_randn(n, input_features)
 # Dummy survival data (replace with actual survival data)
 time <- torch_randint(1, 100, size = c(n, 1))$to(dtype = torch_float())
@@ -24,11 +25,37 @@ event <- torch_randint(0, 2, size = c(n, 1))$to(dtype = torch_float())
 data <- torch_cat(list(data, time), dim = 2)
 dim(data)
 
-# Standardize the input data
-mean_data <- data$mean(1, keepdim = TRUE)
-std_data <- data$std(1, keepdim = TRUE)
-data <- (data - mean_data) / std_data
+# Split the data into training and validation sets
+train_size <- 0.8 * n  # 80% training, 20% validation
+train_indices <- sample(1:n, train_size)
+valid_indices <- setdiff(1:n, train_indices)
 
+train_data <- data[train_indices, ]
+train_time <- time[train_indices, ]
+train_event <- event[train_indices, ]
+
+valid_data <- data[valid_indices, ]
+valid_time <- time[valid_indices, ]
+valid_event <- event[valid_indices, ]
+
+# Create survival datasets
+train_dataset <- SurvivalDataset(train_data, train_time, train_event, normalize = TRUE)
+valid_dataset <- SurvivalDataset(valid_data, valid_time, valid_event, normalize = TRUE)
+
+# Create dataloaders
+train_dataloader <- dataloader(
+  dataset = train_dataset,
+  batch_size = batch_size,
+  shuffle = TRUE
+)
+
+valid_dataloader <- dataloader(
+  dataset = valid_dataset,
+  batch_size = batch_size,
+  shuffle = FALSE  # No shuffling for validation
+)
+
+valid_dataset$data
 # Define the neural network model
 net <- BaseMLP(
   in_features = input_size,
@@ -62,38 +89,76 @@ cox_loss_fn <- function(pred_risk_score, time, event) {
 optimizer <- optim_adam(net$parameters, lr = learning_rate)
 
 # Training loop with loss tracking
-loss_values <- numeric(num_epochs)
+training_loss <- numeric(num_epochs)
+validation_loss <- numeric(num_epochs)
 
-# Training loop
+# Training loop with validation
+# Training loop with validation
 for (epoch in 1:num_epochs) {
-  # Zero gradients
-  optimizer$zero_grad()
+  # Training Phase
+  net$train()  # Set the network to training mode
+  total_train_loss <- 0
 
-  # Forward pass
-  predictions <- net(data)
-  loss <- cox_loss_fn(predictions, time, event)
+  coro::loop(for (batch in train_dataloader) {
+    batch_data <- batch$data
+    batch_time <- batch$time
+    batch_event <- batch$event
 
-  # Store loss value
-  loss_values[epoch] <- loss$item()
+    optimizer$zero_grad()
+    predictions <- net(batch_data)
+    train_loss <- cox_loss_fn(predictions, batch_time, batch_event)
+    total_train_loss <- total_train_loss + train_loss$item()
 
-  # Backward pass and optimize
-  loss$backward()
-  optimizer$step()
+    train_loss$backward()
+    optimizer$step()
+  })
 
-  # Print loss every 10 epochs
+  avg_train_loss <- total_train_loss / length(train_dataloader)
+
+  # Validation Phase
+  net$eval()  # Set the network to evaluation mode (disables dropout, etc.)
+  total_valid_loss <- 0
+
+  with_no_grad({
+    coro::loop(for (batch in valid_dataloader) {
+      batch_data <- batch$data
+      batch_time <- batch$time
+      batch_event <- batch$event
+
+      predictions <- net(batch_data)
+      valid_loss <- cox_loss_fn(predictions, batch_time, batch_event)
+      total_valid_loss <- total_valid_loss + valid_loss$item()
+    })
+  })
+
+  avg_valid_loss <- total_valid_loss / length(valid_dataloader)
+
+  # Store training and validation losses
+  training_loss[epoch] <- avg_train_loss
+  validation_loss[epoch] <- avg_valid_loss
+
+  # Print losses every 10 epochs
   if (epoch %% 10 == 0) {
-    cat("Epoch:", epoch, "Loss:", loss$item(), "\n")
+    cat("Epoch:", epoch,
+        "Avg Train Loss:", avg_train_loss,
+        "Avg Valid Loss:", avg_valid_loss, "\n")
   }
 }
 
 # Plot training loss
-loss_df <- data.frame(Epoch = 1:num_epochs, Loss = loss_values)
+loss_df <- data.frame(
+  Epoch = 1:num_epochs,
+  TrainLoss = training_loss,
+  ValidLoss = validation_loss
+)
 
-ggplot(loss_df, aes(x = Epoch, y = Loss)) +
-  geom_line(color = "blue") +
-  labs(title = "Training Loss over Epochs",
+ggplot(loss_df) +
+  geom_line(aes(x = Epoch, y = TrainLoss, color = "Train")) +
+  geom_line(aes(x = Epoch, y = ValidLoss, color = "Validation")) +
+  labs(title = "Training and Validation Loss over Epochs",
        x = "Epoch",
-       y = "Loss") +
+       y = "Loss",
+       color = "Dataset") +
   theme_minimal()
 
 # Plot survival curves
